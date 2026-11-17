@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>キャットボットのおさんぽ</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#9fd8f7;
+    font-family:"Hiragino Maru Gothic ProN","Hiragino Sans","Noto Sans JP",sans-serif;
+    -webkit-user-select:none; user-select:none; touch-action:none; }
+  #app { position:fixed; inset:0; }
+  canvas { display:block; }
+  .panel { position:absolute; z-index:10; color:#20405c; }
+  #title { top:14px; left:16px; pointer-events:none; }
+  #title h1 { margin:0; font-size:20px; font-weight:800; letter-spacing:.04em;
+    color:#fff; text-shadow:0 2px 0 rgba(32,64,92,.25), 0 0 14px rgba(255,255,255,.35); }
+  #title p { margin:4px 0 0; font-size:12px; color:#eaf7ff; text-shadow:0 1px 2px rgba(32,64,92,.4); }
+  #buttons { top:14px; right:14px; display:flex; gap:8px; }
+  .btn { border:none; cursor:pointer; font-family:inherit; font-weight:700; font-size:13px;
+    padding:9px 14px; border-radius:999px; color:#20405c; background:rgba(255,255,255,.88);
+    box-shadow:0 3px 0 rgba(32,64,92,.18); }
+  .btn:active { transform:translateY(2px); box-shadow:0 1px 0 rgba(32,64,92,.18); }
+  .btn.on { background:#ffd93d; }
+  #hint { bottom:12px; left:0; right:0; text-align:center; font-size:12px; color:#eaf7ff;
+    text-shadow:0 1px 2px rgba(32,64,92,.45); pointer-events:none; }
+  #joy { position:absolute; z-index:10; left:22px; bottom:52px; width:118px; height:118px;
+    border-radius:50%; background:rgba(255,255,255,.22); border:2px solid rgba(255,255,255,.5);
+    display:none; }
+  #knob { position:absolute; left:50%; top:50%; width:52px; height:52px; border-radius:50%;
+    background:rgba(255,255,255,.9); box-shadow:0 3px 6px rgba(32,64,92,.3);
+    transform:translate(-50%,-50%); }
+  #loading { position:absolute; inset:0; z-index:20; display:flex; align-items:center; justify-content:center;
+    background:#9fd8f7; color:#20405c; font-weight:700; font-size:15px; transition:opacity .6s; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="app"></div>
+<div id="title" class="panel">
+  <h1>🐾 キャットボットのおさんぽ</h1>
+  <p>ちいさな球体の世界を、歩くだけ。</p>
+</div>
+<div id="buttons" class="panel">
+  <button id="btnAuto" class="btn on">おさんぽモード ON</button>
+  <button id="btnJump" class="btn">ジャンプ</button>
+</div>
+<div id="joy"><div id="knob"></div></div>
+<div id="hint" class="panel">WASD・矢印キー / 左スティックで移動 ・ ドラッグでカメラ ・ スペースでジャンプ</div>
+<div id="loading">よみこみ中…</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const R = 26;                 // planet radius
+const CHAR_SCALE = 0.09;      // 57.26mm -> ~5.15 units
+const WALK_SPEED = 3.4;
+const TURN_RATE = 3.4;
+
+// ---------- renderer / scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+document.getElementById('app').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+{ // sky gradient background
+  const c = document.createElement('canvas'); c.width = 4; c.height = 512;
+  const g = c.getContext('2d');
+  const gr = g.createLinearGradient(0,0,0,512);
+  gr.addColorStop(0, '#6ec1f5'); gr.addColorStop(0.55, '#a5dcf9'); gr.addColorStop(1, '#e3f7ff');
+  g.fillStyle = gr; g.fillRect(0,0,4,512);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  scene.background = tex;
+}
+scene.fog = new THREE.Fog(0xbfe6fa, 70, 190);
+
+const camera = new THREE.PerspectiveCamera(78, innerWidth/innerHeight, 0.1, 600);
+
+const hemi = new THREE.HemisphereLight(0xd6f0ff, 0x6fbf4e, 0.95);
+scene.add(hemi);
+const sunDir = new THREE.Vector3(0.55, 0.85, 0.35).normalize();
+const sun = new THREE.DirectionalLight(0xfff1d6, 1.7);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -17; sun.shadow.camera.right = 17;
+sun.shadow.camera.top = 17; sun.shadow.camera.bottom = -17;
+sun.shadow.camera.near = 1; sun.shadow.camera.far = 140;
+sun.shadow.bias = -0.0006;
+scene.add(sun); scene.add(sun.target);
+
+// ---------- planet ----------
+function groundTexture() {
+  const c = document.createElement('canvas'); c.width = 1024; c.height = 512;
+  const g = c.getContext('2d');
+  g.fillStyle = '#6fc24e'; g.fillRect(0,0,1024,512);
+  const cols = ['#63b445','#7ccc58','#8fd45e','#5da841','#79c453'];
+  for (let i=0;i<260;i++){
+    g.fillStyle = cols[(Math.random()*cols.length)|0];
+    g.globalAlpha = 0.16 + Math.random()*0.2;
+    const x=Math.random()*1024, y=Math.random()*512, r=14+Math.random()*46;
+    g.beginPath(); g.ellipse(x,y,r,r*(0.5+Math.random()*0.5),Math.random()*3.2,0,6.3); g.fill();
+  }
+  g.globalAlpha = 0.5; g.fillStyle = '#e9f7d8';
+  for (let i=0;i<500;i++){ g.fillRect(Math.random()*1024, Math.random()*512, 2, 2); }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const planet = new THREE.Mesh(
+  new THREE.SphereGeometry(R, 96, 64),
+  new THREE.MeshStandardMaterial({ map: groundTexture(), roughness: 1, metalness: 0 })
+);
+planet.receiveShadow = true;
+scene.add(planet);
+
+// ---------- helpers ----------
+const UP = new THREE.Vector3(0,1,0);
+const randDir = () => new THREE.Vector3().randomDirection();
+function placeOnSphere(obj, dir, sink = 0) {
+  obj.position.copy(dir).multiplyScalar(R - sink);
+  obj.quaternion.setFromUnitVectors(UP, dir);
+  obj.rotateY(Math.random()*Math.PI*2);
+  scene.add(obj);
+  return obj;
+}
+const std = (color, rough=0.9) => new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: 0 });
+
+// ---------- decorations ----------
+const foliageCols = [0x3f9e4d, 0x4cab54, 0x57b84a, 0x2f8f46];
+function makeTree() {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.32, 1.7, 7), std(0x8a5a2b));
+  trunk.position.y = 0.85; trunk.castShadow = true; g.add(trunk);
+  const col = foliageCols[(Math.random()*foliageCols.length)|0];
+  const s1 = new THREE.Mesh(new THREE.IcosahedronGeometry(1.55, 1), std(col));
+  s1.position.y = 2.7; s1.castShadow = true; g.add(s1);
+  const s2 = new THREE.Mesh(new THREE.IcosahedronGeometry(1.05, 1), std(col));
+  s2.position.set(0.55, 3.6, 0.2); s2.castShadow = true; g.add(s2);
+  const sc = 0.8 + Math.random()*0.7; g.scale.setScalar(sc);
+  return g;
+}
+function makePine() {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.24, 1.1, 7), std(0x7a4a24));
+  trunk.position.y = 0.55; trunk.castShadow = true; g.add(trunk);
+  const col = std(0x2e7d43);
+  const c1 = new THREE.Mesh(new THREE.ConeGeometry(1.35, 2.4, 8), col);
+  c1.position.y = 2.1; c1.castShadow = true; g.add(c1);
+  const c2 = new THREE.Mesh(new THREE.ConeGeometry(0.95, 1.9, 8), col);
+  c2.position.y = 3.4; c2.castShadow = true; g.add(c2);
+  g.scale.setScalar(0.85 + Math.random()*0.6);
+  return g;
+}
+for (let i=0;i<13;i++) placeOnSphere(makeTree(), randDir(), 0.15);
+for (let i=0;i<6;i++)  placeOnSphere(makePine(), randDir(), 0.15);
+for (let i=0;i<10;i++) { // bushes
+  const b = new THREE.Mesh(new THREE.IcosahedronGeometry(0.55+Math.random()*0.4, 1),
+    std(foliageCols[(Math.random()*foliageCols.length)|0]));
+  b.scale.y = 0.65; b.castShadow = true;
+  placeOnSphere(b, randDir(), 0.1);
+}
+for (let i=0;i<8;i++) { // rocks
+  const r = new THREE.Mesh(new THREE.DodecahedronGeometry(0.4+Math.random()*0.65, 0), std(0x9aa3a7, 1));
+  r.scale.y = 0.6; r.castShadow = true;
+  placeOnSphere(r, randDir(), 0.12);
+}
+{ // flowers & grass tufts
+  const petalCols = [0xff6b9d, 0xffd93d, 0xff8c42, 0xc084fc, 0xffffff, 0xff5a5a];
+  const stemMat = std(0x3e8f3a);
+  for (let i=0;i<46;i++){
+    const f = new THREE.Group();
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.55, 5), stemMat);
+    stem.position.y = 0.27; f.add(stem);
+    const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.17, 0),
+      std(petalCols[(Math.random()*petalCols.length)|0], 0.6));
+    head.position.y = 0.6; f.add(head);
+    placeOnSphere(f, randDir(), 0.02);
+  }
+  const tuftMat = std(0x4da344);
+  for (let i=0;i<60;i++){
+    const t = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.55, 5), tuftMat);
+    t.position.y = 0.2;
+    const holder = new THREE.Group(); holder.add(t);
+    placeOnSphere(holder, randDir(), 0.02);
+  }
+}
+
+// ---------- the StopWatch ball landmark (yesterday's gadget, stylized) ----------
+function clockTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#14202e'; g.beginPath(); g.arc(128,128,126,0,6.3); g.fill();
+  g.strokeStyle = '#e8f4ff'; g.fillStyle = '#e8f4ff';
+  for (let i=0;i<12;i++){
+    const a = i/12*Math.PI*2, big = i%3===0;
+    g.lineWidth = big?7:3;
+    g.beginPath();
+    g.moveTo(128+Math.cos(a)*(big?96:106), 128+Math.sin(a)*(big?96:106));
+    g.lineTo(128+Math.cos(a)*116, 128+Math.sin(a)*116);
+    g.stroke();
+  }
+  const hand = (a, len, w, col) => { g.strokeStyle = col; g.lineWidth = w; g.lineCap='round';
+    g.beginPath(); g.moveTo(128,128); g.lineTo(128+Math.cos(a)*len, 128+Math.sin(a)*len); g.stroke(); };
+  hand(-Math.PI/2 + (10.16/12)*Math.PI*2, 62, 11, '#ffffff');   // hour ~10
+  hand(-Math.PI/2 + (9/60)*Math.PI*2, 92, 8, '#ffffff');        // minute ~9
+  hand(-Math.PI/2 + (32/60)*Math.PI*2, 104, 3, '#ff5a4a');      // second
+  g.fillStyle = '#ffd93d'; g.beginPath(); g.arc(128,128,10,0,6.3); g.fill();
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+{
+  const g = new THREE.Group();
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(3.0, 40, 28), std(0xf4f6f4, 0.35));
+  ball.position.y = 1.55; ball.castShadow = true; g.add(ball);
+  const bezel = new THREE.Mesh(new THREE.CylinderGeometry(2.0, 2.15, 0.5, 32), std(0x3a4148, 0.5));
+  bezel.position.y = 4.35; g.add(bezel);
+  const screen = new THREE.Mesh(new THREE.CircleGeometry(1.88, 32),
+    new THREE.MeshStandardMaterial({ map: clockTexture(), roughness: 0.4 }));
+  screen.rotation.x = -Math.PI/2; screen.position.y = 4.62; g.add(screen);
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(2.3, 40, 20, 0, Math.PI*2, 0, Math.PI/2),
+    new THREE.MeshPhongMaterial({ color: 0xd8f2ff, transparent: true, opacity: 0.25,
+      shininess: 140, specular: 0xffffff, side: THREE.DoubleSide, depthWrite: false }));
+  dome.position.y = 4.45; g.add(dome);
+  for (let i=0;i<3;i++){ // side buttons
+    const a = i/3*Math.PI*2 + 0.5;
+    const b = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.28, 0.35, 12), std(0x3a4148, 0.5));
+    b.position.set(Math.cos(a)*3.0, 1.9, Math.sin(a)*3.0);
+    b.rotation.z = Math.PI/2; b.rotation.y = -a;
+    g.add(b);
+  }
+  const plaza = new THREE.Mesh(new THREE.CircleGeometry(4.8, 36), std(0xe9daa4, 1));
+  plaza.rotation.x = -Math.PI/2; plaza.position.y = 0.03; plaza.receiveShadow = true; g.add(plaza);
+  const dir = new THREE.Vector3(0.55, 0.72, 0.42).normalize(); // not far from spawn
+  placeOnSphere(g, dir, 0.25);
+}
+
+// ---------- clouds ----------
+const clouds = [];
+{
+  const mat = std(0xffffff, 1);
+  for (let i=0;i<9;i++){
+    const g = new THREE.Group();
+    const n = 3 + (Math.random()*3|0);
+    for (let j=0;j<n;j++){
+      const s = new THREE.Mesh(new THREE.SphereGeometry(0.9+Math.random()*1.1, 14, 10), mat);
+      s.position.set(j*1.15 - n*0.55, Math.random()*0.4, Math.random()*0.8-0.4);
+      s.scale.y = 0.55; g.add(s);
+    }
+    const dir = randDir();
+    g.position.copy(dir).multiplyScalar(R + 9 + Math.random()*7);
+    g.quaternion.setFromUnitVectors(UP, dir.clone().normalize());
+    scene.add(g);
+    clouds.push({ g, axis: randDir(), speed: 0.004 + Math.random()*0.008 });
+  }
+}
+
+// ---------- character ----------
+const rig = new THREE.Group(); scene.add(rig);        // position + orientation on sphere
+const tilt = new THREE.Group(); rig.add(tilt);        // walk bob / lean
+const orientFix = new THREE.Group();                  // model z-up -> three y-up, front -Y -> +Z
+orientFix.rotation.x = -Math.PI/2;
+tilt.add(orientFix);
+
+let botReady = false;
+new GLTFLoader().load('catbot.glb', (gltf) => {
+  const m = gltf.scene;
+  m.scale.setScalar(CHAR_SCALE);
+  m.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.42, metalness: 0.08 });
+    }
+  });
+  orientFix.add(m);
+  botReady = true;
+  document.getElementById('loading').style.opacity = '0';
+  setTimeout(() => document.getElementById('loading').remove(), 700);
+}, undefined, () => {
+  document.getElementById('loading').textContent = 'モデルの読み込みに失敗しました';
+});
+
+// ---------- movement state ----------
+const pos = new THREE.Vector3(0, 1, 0);               // unit dir from planet center
+const fwd = new THREE.Vector3(0, 0, 1);               // tangent heading
+let speed = 0;                                        // current speed (units/s)
+let stepPhase = 0;
+let jumpH = 0, jumpV = 0, grounded = true;
+
+function doJump() {
+  if (grounded) { jumpV = 4.6; grounded = false; spawnPuff(1.6); }
+}
+
+// ---------- input ----------
+const keys = {};
+addEventListener('keydown', (e) => {
+  keys[e.code] = true;
+  if (e.code === 'Space') { doJump(); e.preventDefault(); }
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) { setAuto(false); e.preventDefault(); }
+  if (e.code.startsWith('Key')) setAuto(false);
+});
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+const joy = { active:false, id:null, x:0, y:0 };
+const joyEl = document.getElementById('joy'), knobEl = document.getElementById('knob');
+if (matchMedia('(pointer: coarse)').matches) joyEl.style.display = 'block';
+function joySet(cx, cy) {
+  const r = joyEl.getBoundingClientRect();
+  let dx = cx - (r.left + r.width/2), dy = cy - (r.top + r.height/2);
+  const max = r.width/2 - 8, len = Math.hypot(dx, dy);
+  if (len > max) { dx *= max/len; dy *= max/len; }
+  knobEl.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+  joy.x = dx/max; joy.y = dy/max;
+}
+joyEl.addEventListener('pointerdown', (e) => { joy.active = true; joy.id = e.pointerId; joyEl.setPointerCapture(e.pointerId); joySet(e.clientX, e.clientY); setAuto(false); });
+joyEl.addEventListener('pointermove', (e) => { if (joy.active && e.pointerId === joy.id) joySet(e.clientX, e.clientY); });
+const joyEnd = (e) => { if (e.pointerId === joy.id) { joy.active = false; joy.x = joy.y = 0; knobEl.style.transform = 'translate(-50%,-50%)'; } };
+joyEl.addEventListener('pointerup', joyEnd); joyEl.addEventListener('pointercancel', joyEnd);
+
+// camera orbit drag (anywhere except joystick / buttons)
+let camYaw = 0, camPitch = 0.40, camDist = 11.5;
+const drag = { active:false, id:null, lx:0, ly:0, moved:false };
+const el = renderer.domElement;
+el.addEventListener('pointerdown', (e) => { drag.active = true; drag.id = e.pointerId; drag.lx = e.clientX; drag.ly = e.clientY; drag.moved = false; });
+el.addEventListener('pointermove', (e) => {
+  if (!drag.active || e.pointerId !== drag.id) return;
+  const dx = e.clientX - drag.lx, dy = e.clientY - drag.ly;
+  if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+  drag.lx = e.clientX; drag.ly = e.clientY;
+  camYaw -= dx * 0.0052;
+  camPitch = THREE.MathUtils.clamp(camPitch + dy * 0.004, 0.06, 1.15);
+});
+el.addEventListener('pointerup', (e) => {
+  if (e.pointerId === drag.id) { if (!drag.moved) doJump(); drag.active = false; }
+});
+el.addEventListener('wheel', (e) => { camDist = THREE.MathUtils.clamp(camDist + e.deltaY * 0.01, 6.5, 18); }, { passive:true });
+let pinchD = 0;
+el.addEventListener('touchmove', (e) => {
+  if (e.touches.length === 2) {
+    const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    if (pinchD) camDist = THREE.MathUtils.clamp(camDist - (d - pinchD) * 0.03, 6.5, 18);
+    pinchD = d;
+  }
+}, { passive:true });
+el.addEventListener('touchend', () => { pinchD = 0; });
+
+// ---------- auto-wander ----------
+let auto = true, autoState = 'walk', autoTimer = 2.5, autoTurn = 0;
+const btnAuto = document.getElementById('btnAuto');
+function setAuto(v) {
+  if (auto === v) return;
+  auto = v; autoTimer = 0.5; autoState = 'walk';
+  btnAuto.textContent = v ? 'おさんぽモード ON' : 'おさんぽモード OFF';
+  btnAuto.classList.toggle('on', v);
+}
+btnAuto.addEventListener('click', () => setAuto(!auto));
+document.getElementById('btnJump').addEventListener('click', doJump);
+
+// ---------- footstep puffs ----------
+const puffTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const gr = g.createRadialGradient(32,32,2,32,32,30);
+  gr.addColorStop(0, 'rgba(255,255,255,0.85)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0,0,64,64);
+  return new THREE.CanvasTexture(c);
+})();
+const puffs = [];
+for (let i=0;i<26;i++){
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: puffTex, transparent: true, opacity: 0, depthWrite: false }));
+  s.visible = false; scene.add(s);
+  puffs.push({ s, life: 0, max: 1, size: 1 });
+}
+let puffIdx = 0, puffTimer = 0;
+const _pv = new THREE.Vector3();
+function spawnPuff(sizeMul = 1) {
+  const p = puffs[puffIdx++ % puffs.length];
+  p.s.position.copy(pos).multiplyScalar(R + 0.15);
+  p.s.position.addScaledVector(_pv.randomDirection(), 0.12);
+  p.life = p.max = 0.55; p.size = (0.5 + Math.random()*0.3) * sizeMul;
+  p.s.visible = true;
+}
+
+// ---------- camera smoothing state ----------
+const camPosS = new THREE.Vector3(0, R + 5, -12);
+const lookS = new THREE.Vector3(0, R + 2, 0);
+const upS = new THREE.Vector3(0, 1, 0);
+let firstFrame = true;
+
+// ---------- main loop ----------
+const clock = new THREE.Clock();
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
+const _m = new THREE.Matrix4();
+const _axis = new THREE.Vector3();
+
+function inputVector() {
+  let ix = 0, iz = 0;
+  if (keys['KeyW'] || keys['ArrowUp']) iz += 1;
+  if (keys['KeyS'] || keys['ArrowDown']) iz -= 1;
+  if (keys['KeyA'] || keys['ArrowLeft']) ix -= 1;
+  if (keys['KeyD'] || keys['ArrowRight']) ix += 1;
+  if (joy.active) { ix += joy.x; iz -= joy.y; }
+  const len = Math.hypot(ix, iz);
+  if (len > 1) { ix /= len; iz /= len; }
+  return { ix, iz, mag: Math.min(1, len) };
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+
+  // ----- decide desired heading -----
+  const inp = inputVector();
+  let wantWalk = false, targetFwd = null;
+
+  // camera-relative basis on the tangent plane
+  const up = pos;
+  const camF = _v3.copy(fwd); // fallback
+  {
+    // camera forward projected to tangent plane
+    const cf = new THREE.Vector3();
+    camera.getWorldDirection(cf);
+    cf.addScaledVector(up, -cf.dot(up));
+    if (cf.lengthSq() > 0.001) camF.copy(cf.normalize());
+  }
+  const camR = new THREE.Vector3().crossVectors(camF, up).normalize(); // screen right
+  if (inp.mag > 0.12) {
+    targetFwd = new THREE.Vector3()
+      .addScaledVector(camF, inp.iz)
+      .addScaledVector(camR, inp.ix)
+      .normalize();
+    wantWalk = true;
+  } else if (auto) {
+    autoTimer -= dt;
+    if (autoTimer <= 0) {
+      if (autoState === 'walk') {
+        if (Math.random() < 0.3) { autoState = 'idle'; autoTimer = 1 + Math.random()*1.8; }
+        else { autoTurn = (Math.random() - 0.5) * 2.2; autoTimer = 2 + Math.random()*3.5; if (Math.random() < 0.06) doJump(); }
+      } else { autoState = 'walk'; autoTurn = (Math.random() - 0.5) * 2.4; autoTimer = 2.5 + Math.random()*3.5; }
+    }
+    if (autoState === 'walk') {
+      targetFwd = fwd.clone().applyAxisAngle(up, autoTurn * dt * 1.4).normalize();
+      wantWalk = true;
+    }
+  }
+
+  // ----- turn & move -----
+  const targetSpeed = wantWalk ? WALK_SPEED : 0;
+  speed += (targetSpeed - speed) * Math.min(1, dt * 6);
+  if (targetFwd && speed > 0.05) {
+    const cross = new THREE.Vector3().crossVectors(fwd, targetFwd);
+    const sinA = cross.dot(up);
+    const cosA = THREE.MathUtils.clamp(fwd.dot(targetFwd), -1, 1);
+    const ang = Math.atan2(sinA, cosA);
+    const step = THREE.MathUtils.clamp(ang, -TURN_RATE * dt, TURN_RATE * dt);
+    fwd.applyAxisAngle(up, step);
+    fwd.addScaledVector(up, -fwd.dot(up)).normalize();
+  }
+  if (speed > 0.01) {
+    const angMove = speed * dt / R;
+    _axis.crossVectors(pos, fwd).normalize();
+    pos.applyAxisAngle(_axis, angMove).normalize();
+    fwd.applyAxisAngle(_axis, angMove);
+    fwd.addScaledVector(up, -fwd.dot(up)).normalize();
+    stepPhase += dt * speed * 2.6;
+    if (grounded) {
+      puffTimer -= dt;
+      if (puffTimer <= 0) { spawnPuff(1); puffTimer = 0.21; }
+    }
+  }
+
+  // ----- jump -----
+  if (!grounded) {
+    jumpV -= 13.5 * dt;
+    jumpH += jumpV * dt;
+    if (jumpH <= 0) { jumpH = 0; grounded = true; spawnPuff(1.5); }
+  }
+
+  // ----- place character -----
+  const speedF = THREE.MathUtils.clamp(speed / WALK_SPEED, 0, 1);
+  const bob = grounded ? (speedF > 0.03 ? Math.abs(Math.sin(stepPhase)) * 0.15 * speedF
+                                        : Math.sin(t * 1.8) * 0.035) : 0.05;
+  rig.position.copy(pos).multiplyScalar(R + bob + jumpH);
+  _v1.crossVectors(up, fwd).normalize();               // right
+  _m.makeBasis(_v1, up, fwd);
+  rig.quaternion.setFromMatrix(_m);
+  tilt.rotation.z = speedF > 0.03 ? Math.sin(stepPhase) * 0.055 * speedF : Math.sin(t * 0.9) * 0.012;
+  tilt.rotation.x = speedF * 0.06 + (grounded ? Math.sin(stepPhase * 2) * 0.018 * speedF : -0.1);
+
+  // ----- camera -----
+  const back = _v2.copy(fwd).multiplyScalar(-1).applyAxisAngle(up, camYaw);
+  const camDir = back.multiplyScalar(Math.cos(camPitch)).addScaledVector(up, Math.sin(camPitch)).normalize();
+  const charPos = rig.position;
+  const camPos = _v3.copy(charPos).addScaledVector(camDir, camDist).addScaledVector(up, 1.1);
+  const k = firstFrame ? 1 : 1 - Math.exp(-5.5 * dt);
+  camPosS.lerp(camPos, k);
+  upS.lerp(up, k).normalize();
+  const look = new THREE.Vector3().copy(charPos).addScaledVector(up, 2.5).addScaledVector(fwd, 1.4);
+  lookS.lerp(look, k);
+  camera.position.copy(camPosS);
+  camera.up.copy(upS);
+  camera.lookAt(lookS);
+
+  // ----- sun follows -----
+  sun.position.copy(charPos).addScaledVector(sunDir, 55);
+  sun.target.position.copy(charPos);
+
+  // ----- clouds drift -----
+  for (const c of clouds) {
+    c.g.position.applyAxisAngle(c.axis, c.speed * dt);
+    const d = _v1.copy(c.g.position).normalize();
+    c.g.quaternion.setFromUnitVectors(UP, d);
+  }
+
+  // ----- puffs -----
+  for (const p of puffs) {
+    if (p.life <= 0) continue;
+    p.life -= dt;
+    const f = Math.max(p.life, 0) / p.max;
+    p.s.material.opacity = f * 0.55;
+    const sc = p.size * (1.6 - f * 0.9);
+    p.s.scale.set(sc, sc, 1);
+    if (p.life <= 0) p.s.visible = false;
+  }
+
+  firstFrame = false;
+  if (botReady) renderer.render(scene, camera);
+}
+animate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
